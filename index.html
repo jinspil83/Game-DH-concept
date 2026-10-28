@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Terénní hra</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+:root{--bg:#f3efe3;--ink:#23301f;--card:#fffdf6;--line:#c9c2a8;--accent:#c2501f;--ok:#2f7d4a;--bad:#b3261e}
+@media (prefers-color-scheme:dark){:root{--bg:#171c14;--ink:#e8e6d6;--card:#222a1e;--line:#3d4736;--accent:#f08a54;--ok:#6cc58a;--bad:#f28b82}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;flex-direction:column;height:100dvh;background:var(--bg);color:var(--ink);font-family:Georgia,"Times New Roman",serif;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:6px 10px;padding:8px 14px}
+h1{margin:0;font-size:1.1rem}
+#pts{font-weight:700;font-variant-numeric:tabular-nums}
+#tools{display:flex;gap:6px}
+#tools button{font-size:.8rem;padding:5px 9px}
+#dbg{width:100%;font:12px monospace}
+#map{flex:1;min-height:180px;border-top:1px solid var(--line)}
+#panel{max-height:52vh;overflow:auto;padding:14px 16px;background:var(--card);border-top:1px solid var(--line);display:flex;flex-direction:column;gap:10px}
+#panel h2{margin:0;font-size:1.1rem}
+#panel p{margin:0;line-height:1.5}
+.small{font-size:.9rem;opacity:.85}
+button,.btn{font:inherit;font-size:1rem;padding:11px 16px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--ink);cursor:pointer;text-align:center;display:block;text-decoration:none}
+.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button:disabled{opacity:.45;cursor:default}
+button.link{border:0;background:none;color:var(--accent);font-size:.85rem;padding:4px;text-decoration:underline}
+button:focus-visible,.btn:focus-visible,a:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.fb{font-weight:700}.ok{color:var(--ok)}.bad{color:var(--bad)}
+.row{display:flex;gap:8px}.row>*{flex:1}
+.opts{display:flex;flex-direction:column;gap:8px}
+.opts button{text-align:left}
+.opts button.right{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 20%,var(--bg))}
+.opts button.wrong{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 18%,var(--bg))}
+img.shot{width:100%;max-height:32vh;object-fit:cover;border-radius:12px;border:1px solid var(--line)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.grid figure{margin:0}.grid img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:10px}
+.grid figcaption{font-size:.8rem;margin-top:2px}
+ul.res{margin:0;padding-left:18px;line-height:1.6}
+.pin{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:#fff;font:700 15px Georgia,serif;border:3px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.45)}
+.pin.locked{background:#8d8b7a}.pin.active{background:#c2501f}.pin.done{background:#2f7d4a}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="ttl">Terénní hra</h1><span id="pts"></span>
+  <div id="tools"><button id="me">Moje poloha</button><button id="all">Celá trasa</button></div>
+  <div id="dbg" hidden></div>
+</header>
+<div id="map"></div>
+<section id="panel" aria-live="polite"></section>
+<input type="file" id="cam" accept="image/*" capture="environment" hidden>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+/* ================= NASTAVENÍ ================= */
+const VERSION='0.2'; // zvyš při každé úpravě, ať vidíš, že se nahrála nová verze
+const MAPY_KEY=''; // API klíč z developer.mapy.com (zdarma). Prázdné = záložní podklad OpenStreetMap.
+
+/* Škála tolerance polohy podle nejmenší vzdálenosti mezi sousedními stanovišti: [méně než (m), poloměr (m)] */
+const RADIUS_SCALE=[[150,30],[500,50],[2000,100],[10000,200],[1e9,500]];
+
+/* Jedna hra = jedna lokalita. Další hru přidáš zkopírováním bloku níže (nová záložka v poli GAMES).
+   Odkaz na konkrétní hru: adresa_stránky#id (např. ...#divci-hrady). Při jedné hře se spustí rovnou.
+   radius: 'auto' (podle škály výše) nebo číslo v metrech.
+   pts: station = body za splnění stanoviště (poloha + foto), quiz = body za správnou odpověď,
+        fallback = násobek bodů za stanoviště, když poloha nefunguje (jen foto).
+   Souřadnice c:[šířka, délka]. Přesné zjistíš na místě: otevři hru s ?debug na konci adresy. */
+const GAMES=[
+{
+ id:'divci-hrady', title:'Dívčí hrady (Praha)',
+ intro:'Čtyři stanoviště na Děvíně a v okolí. Na každém musíš být přímo na místě, vyfotit zadaný záběr a odpovědět na kvízovou otázku. Čas se měří jen pro zajímavost, do bodů se nepočítá.',
+ radius:100, // dočasně 100 m, dokud nejsou souřadnice přesné; pak lze dát 'auto'
+ pts:{station:100,quiz:50,fallback:0.5},
+ stations:[
+  {n:'Vodárenská věž Děvín',c:[50.0495,14.3995],find:'Vodárenská věž Děvín Praha',
+   task:'Najdi modrou vodárenskou věž a vyfoť ji celou.',
+   info:'Věž vznikla v letech 1976–1977 a stojí tam, kam pověst o dívčí válce umisťuje sídlo Vlasty.',
+   quiz:{q:'K čemu věž Děvín slouží?',o:['Je zásobárnou pitné vody','Tlumí tlakové rázy na přívodním řadu pitné vody','Je to rozhledna','Je to požární hlásná věž'],a:1}},
+  {n:'Vyhlídka Ctirad',c:[50.0510,14.4040],find:'Přírodní památka Ctirad Praha',
+   task:'Vyfoť pohled do Vltavského údolí z vyhlídky.',
+   info:'Podle pověsti tu byl umučen rytíř Ctirad. Dnes je to přírodní památka.',
+   quiz:{q:'Kdy byl Ctirad vyhlášen přírodní památkou?',o:['1948','1968','1988','2008'],a:2}},
+  {n:'Vyhlídka Děvín',c:[50.0485,14.4010],find:'Děvín vyhlídka Praha Dívčí hrady',
+   task:'Vyfoť údolí tak, aby na snímku byl vidět Barrandovský most.',
+   info:'Z Děvína je výhled na protější břeh Vltavy a Barrandov.',
+   quiz:{q:'Jak se podle pověsti jmenovala vůdkyně dívek v dívčí válce?',o:['Šárka','Vlasta','Libuše','Kazi'],a:1}},
+  {n:'Výběh koní Převalského',c:[50.0510,14.3960],find:'Koně Převalského Dívčí hrady Praha',
+   task:'Vyfoť koně Převalského v ohradě, nebo aspoň informační ceduli.',
+   info:'Výběh má téměř 20 hektarů a koně sem umístila pražská zoo.',
+   quiz:{q:'Z jaké země původně pochází kůň Převalského?',o:['Mongolsko','Island','Maroko','Argentina'],a:0}}
+ ]
+}
+];
+/* ============================================= */
+
+const $=id=>document.getElementById(id);
+const DEBUG=/[?&]debug/.test(location.search);
+const dist=(a,b,c,d)=>{const r=Math.PI/180,x=Math.sin((c-a)*r/2)**2+Math.cos(a*r)*Math.cos(c*r)*Math.sin((d-b)*r/2)**2;return 12742000*Math.asin(Math.sqrt(x))};
+const tm=t=>new Date(t).toLocaleTimeString('cs-CZ',{hour:'2-digit',minute:'2-digit'});
+const dur=ms=>{const m=Math.max(1,Math.round(ms/60000));return m<60?m+' min':Math.floor(m/60)+' h '+(m%60)+' min'};
+const G=GAMES.length===1?GAMES[0]:GAMES.find(g=>g.id===location.hash.slice(1));
+window.onhashchange=()=>location.reload();
+
+if(!G){
+  $('map').style.display='none';$('tools').style.display='none';
+  $('panel').innerHTML='<h2>Vyber hru</h2>'+GAMES.map(g=>`<a class="btn primary" href="#${g.id}">${g.title}</a>`).join('');
+}else main();
+
+function main(){
+const S=G.stations,P_=G.pts,KEY='hra:'+G.id;
+const maxPts=S.length*(P_.station+P_.quiz);
+document.title=G.title;$('ttl').textContent=G.title;
+if(DEBUG)$('dbg').hidden=false;
+
+let R=typeof G.radius==='number'?G.radius:(()=>{let m=1e9;for(let i=1;i<S.length;i++)m=Math.min(m,dist(...S[i-1].c,...S[i].c));return RADIUS_SCALE.find(r=>m<r[0])[1]})();
+let st={cur:0,phase:'goto',res:[],t0:null,t1:null},sel=0,running=false,pending=null,fallback=false;
+let pos=null,watchErr='',watchId=null,markers=[],ring,me,meAcc;
+try{const d=JSON.parse(localStorage.getItem(KEY)||'null');if(d){st=d;sel=Math.min(st.cur,S.length-1)}}catch(e){}
+const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(st))}catch(e){}};
+const total=()=>st.res.reduce((a,r)=>a+(r?(r.pts||0)+(r.qpts||0):0),0);
+
+/* mapa */
+const map=L.map('map');
+if(MAPY_KEY){
+  L.tileLayer(`https://api.mapy.com/v1/maptiles/basic/256/{z}/{x}/{y}?apikey=${MAPY_KEY}`,{minZoom:0,maxZoom:19,attribution:'&copy; Seznam.cz a.s. a další'}).addTo(map);
+  const logo=L.control({position:'bottomleft'});
+  logo.onAdd=()=>{const a=L.DomUtil.create('a');a.href='https://mapy.com/';a.target='_blank';a.rel='noopener';a.innerHTML='<img src="https://api.mapy.com/img/api/logo.svg" width="80" alt="Mapy.com">';return a};
+  logo.addTo(map);
+}else L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; přispěvatelé OpenStreetMap'}).addTo(map);
+const fit=()=>map.fitBounds(L.latLngBounds(S.map(s=>s.c)),{padding:[40,40],maxZoom:17});
+fit();setTimeout(()=>map.invalidateSize(),200);
+
+function draw(){
+  markers.forEach(m=>m.remove());if(ring)ring.remove();
+  markers=S.map((s,i)=>{
+    const c=i<st.cur?'done':i===st.cur?'active':'locked';
+    const m=L.marker(s.c,{title:s.n,icon:L.divIcon({className:'',html:`<div class="pin ${c}">${i+1}</div>`,iconSize:[34,34],iconAnchor:[17,17]})}).addTo(map);
+    m.on('click',()=>{sel=i;pending=null;render()});return m;
+  });
+  if(st.cur<S.length)ring=L.circle(S[st.cur].c,{radius:R,color:'#c2501f',weight:2,fillOpacity:.12}).addTo(map);
+  $('pts').textContent=running||st.t0?`Body: ${total()}`:'';
+}
+
+/* poloha */
+function startWatch(){
+  if(watchId!==null)return;
+  if(!navigator.geolocation){watchErr='Toto zařízení nepodporuje určení polohy.';return}
+  watchId=navigator.geolocation.watchPosition(p=>{
+    pos={lat:p.coords.latitude,lon:p.coords.longitude,acc:p.coords.accuracy||0};watchErr='';
+    const pt=[pos.lat,pos.lon];
+    if(me){me.setLatLng(pt);meAcc.setLatLng(pt).setRadius(pos.acc)}
+    else{meAcc=L.circle(pt,{radius:pos.acc,color:'#2a6df4',weight:1,fillOpacity:.1}).addTo(map);me=L.circleMarker(pt,{radius:8,color:'#fff',weight:3,fillColor:'#2a6df4',fillOpacity:1}).addTo(map)}
+    if(DEBUG)$('dbg').textContent=`${pos.lat.toFixed(5)}, ${pos.lon.toFixed(5)} (±${Math.round(pos.acc)} m)`;
+    updateDist();
+  },e=>{
+    watchErr=e.code===1?'Poloha je zablokovaná. Povol ji v nastavení prohlížeče nebo telefonu.':'Polohu se nepodařilo zjistit. Zkus to pod širým nebem.';
+    watchId=null;updateDist();
+  },{enableHighAccuracy:true,maximumAge:2000,timeout:20000});
+}
+const noLoc=()=>fallback||(!pos&&!!watchErr);
+function updateDist(){
+  const el=$('dist'),b=$('shoot');
+  if(!el||st.phase!=='goto'||st.cur>=S.length)return;
+  if(noLoc()){el.textContent=(watchErr?watchErr+' ':'')+`Pokračuješ jen s fotkou (body ×${P_.fallback}).`;if(b)b.disabled=false;return}
+  if(!pos){el.textContent=watchErr||'Zjišťuji polohu…';if(b)b.disabled=true;return}
+  const s=S[st.cur],d=dist(pos.lat,pos.lon,s.c[0],s.c[1]),tol=R+Math.min(pos.acc,40),ok=d<=tol;
+  el.innerHTML=ok?`<span class="ok fb">Jsi na místě!</span> (asi ${Math.round(d)} m od bodu)`:`Do stanoviště zbývá asi <b>${Math.round(d)} m</b>. Přijď blíž než ${Math.round(tol)} m.`;
+  if(b){b.disabled=!ok;b.dataset.d=Math.round(d)}
+}
+$('me').onclick=()=>{startWatch();if(pos)map.flyTo([pos.lat,pos.lon],Math.max(map.getZoom(),16))};
+$('all').onclick=fit;
+
+/* odkazy Mapy.com */
+const nav=s=>`https://mapy.com/fnc/v1/route?mapset=outdoor&end=${s.c[1]},${s.c[0]}&routeType=foot_fast&navigate=true`;
+const find=s=>`https://mapy.com/fnc/v1/search?query=${encodeURIComponent(s.find||s.n)}&mapset=outdoor`;
+
+/* panel */
+function render(extra=''){
+  const Pn=$('panel');
+  if(!running){
+    const resume=st.t0&&st.cur<S.length;
+    Pn.innerHTML=`<h2>${G.title}</h2><p>${G.intro}</p><ul class="res"><li>Splnění stanoviště (poloha + foto): ${P_.station} b.</li><li>Správná odpověď v kvízu: ${P_.quiz} b.</li><li>Maximum: ${maxPts} b.</li></ul><p class="small">Hra používá tvou polohu a fotoaparát. Tolerance polohy: ${R} m. Verze ${VERSION}.</p><button class="primary" id="go">${resume?'Pokračovat ve hře':'Začít hru'}</button>`;
+    $('go').onclick=()=>{running=true;if(!st.t0){st.t0=Date.now();save()}startWatch();draw();render()};return;
+  }
+  if(st.cur>=S.length){
+    Pn.innerHTML=`<h2>Hotovo! ${total()} / ${maxPts} bodů</h2><p class="small">Celkový čas: ${dur((st.t1||Date.now())-st.t0)}</p><ul class="res">`+
+      S.map((s,i)=>`<li>${s.n}: ${st.res[i].pts} + ${st.res[i].qpts} b.</li>`).join('')+'</ul><div class="grid">'+
+      S.map((s,i)=>`<figure><img src="${st.res[i].photo}" alt="${s.n}"><figcaption>${i+1}. ${s.n} · ${tm(st.res[i].time)}</figcaption></figure>`).join('')+
+      '</div><button id="again">Začít znovu</button>';
+    $('again').onclick=()=>{st={cur:0,phase:'goto',res:[],t0:null,t1:null};sel=0;running=false;pending=null;fallback=false;save();draw();render();fit()};return;
+  }
+  const s=S[sel],head=`<h2>${sel+1}. ${s.n}</h2>`;
+  if(sel>st.cur){Pn.innerHTML=head+`<p>Zamčeno. Nejdřív dokonči stanoviště ${st.cur+1}: ${S[st.cur].n}.</p>`;return}
+  if(sel<st.cur){const r=st.res[sel];Pn.innerHTML=head+`<p class="fb ok">Splněno: ${r.pts} + ${r.qpts} b.</p><img class="shot" src="${r.photo}" alt="Tvoje fotka">`;return}
+  const r=st.res[st.cur];
+  if(st.phase==='goto'){
+    let h=head+`<p>${s.task}</p><p class="small">${s.info}</p><div class="row"><a class="btn" href="${nav(s)}" target="_blank" rel="noopener">Navigovat pěšky</a><a class="btn" href="${find(s)}" target="_blank" rel="noopener">Najít v Mapy.com</a></div><p id="dist" class="small"></p>`;
+    if(pending)h+=`<img class="shot" src="${pending.data}" alt="Náhled fotky"><p class="small">Pořízeno v ${tm(pending.time)}. Je na fotce to, co máš vyfotit?</p><div class="row"><button id="retake">Vyfotit znovu</button><button class="primary" id="ok">Potvrdit</button></div>`;
+    else h+=`<button class="primary" id="shoot" disabled>Vyfotit</button>`+(fallback?'':'<button class="link" id="nofix">Poloha nefunguje? Pokračovat jen s fotkou (méně bodů)</button>');
+    Pn.innerHTML=h+extra;
+    if(pending){
+      $('retake').onclick=()=>{pending=null;$('cam').click()};
+      $('ok').onclick=()=>{
+        const pts=Math.round(P_.station*(pending.loc?1:P_.fallback));
+        st.res[st.cur]={photo:pending.data,time:pending.time,pts,qpts:0,loc:pending.loc};
+        pending=null;st.phase='quiz';save();draw();render();
+      };
+    }else{
+      $('shoot').onclick=()=>$('cam').click();
+      const nf=$('nofix');if(nf)nf.onclick=()=>{fallback=true;render()};
+      updateDist();
+    }
+    return;
+  }
+  /* kvíz a po něm odemčení dalšího */
+  const q=s.quiz,answered=st.phase==='next';
+  let h=head+`<p class="fb ok">Stanoviště splněno! +${r.pts} b.${r.loc?'':' (bez kontroly polohy)'}</p>`;
+  if(q){
+    h+=`<p><b>Kvíz:</b> ${q.q}</p><div class="opts">`+q.o.map((o,i)=>{
+      const cls=answered?(i===q.a?'right':i===r.ans?'wrong':''):'';
+      return `<button data-o="${i}" class="${cls}" ${answered?'disabled':''}>${o}</button>`}).join('')+'</div>';
+    if(answered)h+=r.qpts?`<p class="fb ok">Správně! +${r.qpts} b.</p>`:`<p class="fb bad">Tentokrát ne. Správná odpověď: ${q.o[q.a]}.</p>`;
+  }
+  if(answered||!q)h+=`<button class="primary" id="next">${st.cur>=S.length-1?'Dokončit hru':'Další stanoviště'}</button>`;
+  Pn.innerHTML=h;
+  if(!answered&&q)Pn.querySelectorAll('[data-o]').forEach(b=>b.onclick=()=>{
+    const i=+b.dataset.o,ok=i===q.a;
+    r.ans=i;r.qpts=ok?P_.quiz:0;st.phase='next';save();draw();render();
+  });
+  if($('next'))$('next').onclick=()=>{
+    st.cur++;st.phase='goto';fallback=false;pending=null;sel=Math.min(st.cur,S.length-1);
+    if(st.cur>=S.length)st.t1=Date.now();
+    save();draw();render();
+    if(st.cur<S.length)map.flyTo(S[st.cur].c,Math.max(map.getZoom(),16));
+  };
+}
+
+/* fotka */
+$('cam').onchange=e=>{
+  const f=e.target.files[0];e.target.value='';
+  if(!f)return;
+  if(!f.type.startsWith('image/')){render('<p class="fb bad">Vyber prosím fotku.</p>');return}
+  const loc=!noLoc(),url=URL.createObjectURL(f),img=new Image();
+  img.onload=()=>{
+    const sc=Math.min(1,520/img.width),cv=document.createElement('canvas');
+    cv.width=Math.round(img.width*sc);cv.height=Math.round(img.height*sc);
+    cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);
+    pending={data:cv.toDataURL('image/jpeg',.7),time:f.lastModified||Date.now(),loc};
+    URL.revokeObjectURL(url);render();
+  };
+  img.onerror=()=>render('<p class="fb bad">Fotku se nepodařilo načíst, zkus to znovu.</p>');
+  img.src=url;
+};
+
+draw();render();
+}
+</script>
+</body>
+</html>
